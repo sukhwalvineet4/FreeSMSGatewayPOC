@@ -477,8 +477,8 @@ app.get("/v1/devices", (req, res) => {
    LEGACY & NEW MOBILE APP POLLING ENDPOINTS (AUTO-REGISTERS CONNECTED PHONES)
    ========================================================================= */
 
-// Legacy Polling Endpoint from Android Companion App
-app.get("/v1/messages/pending", (req, res) => {
+// Legacy & New Polling Endpoint from Android Companion App
+app.get(["/v1/messages/pending", "/v1/devices/pending", "/v1/devices/:deviceId/pending"], (req, res) => {
     // Auto-Register Polling Mobile Device as ONLINE
     const deviceId = req.query.deviceId || "mobile_poller_sim";
     if (!activeDevices.has(deviceId)) {

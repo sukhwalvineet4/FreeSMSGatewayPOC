@@ -102,7 +102,7 @@ router.post("/v1/messages/send", (req, res) => {
 /* =========================================================================
    3. PENDING SMS ENDPOINT (Android App isko call karke SMS uthati hai)
    ========================================================================= */
-router.get("/v1/messages/pending", (req, res) => {
+router.get(["/v1/messages/pending", "/v1/devices/pending", "/v1/devices/:deviceId/pending"], (req, res) => {
     if (pendingSmsQueue.length === 0) {
         return res.json({ status: "empty", messages: [] });
     }
