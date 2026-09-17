@@ -1,10 +1,6 @@
 import express from "express";
-import cors from "cors";
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+const router = express.Router();
 
 /* =========================================================================
    FREE MOBILE SIM GATEWAY STATE ENGINE (Stateless RAM Storage)
@@ -26,8 +22,8 @@ function generateMsgId() {
 /* =========================================================================
    1. DETECT SIM DEVICE ENDPOINT (Sir ke App Status Check ke liye)
    ========================================================================= */
-app.get("/v1/sim/detect-device", (req, res) => {
-    const isConnected = activeDevices.size > 0 || true; // Active or ready
+router.get("/v1/sim/detect-device", (req, res) => {
+    const isConnected = activeDevices.size > 0 || true;
     const activeDev = activeDevices.size > 0 ? activeDevices.values().next().value : null;
 
     return res.json({
@@ -43,9 +39,9 @@ app.get("/v1/sim/detect-device", (req, res) => {
 });
 
 /* =========================================================================
-   2. AUTOMATED SEND SMS ENDPOINT (Sir ke Main App / Signup / OTP Flow ke liye)
+   2. AUTOMATED SEND SMS ENDPOINT (Sir ke Main App / Signup / Flow ke liye)
    ========================================================================= */
-app.post("/v1/messages/send", (req, res) => {
+router.post("/v1/messages/send", (req, res) => {
     // Flexibly accept parameters from Sir's Signup System
     const recipientPhone = req.body.to || req.body.mobileNumber || req.body.phone;
     const messageText = req.body.content || req.body.message || req.body.text || "Welcome to Aarnyasetu";
@@ -54,7 +50,7 @@ app.post("/v1/messages/send", (req, res) => {
     if (!recipientPhone) {
         return res.status(400).json({
             status: "error",
-            message: "Missing required parameters: 'to' (or 'mobileNumber') and 'content' (or 'message') must be provided."
+            message: "Missing required parameter: 'to' (or 'mobileNumber') must be provided."
         });
     }
 
@@ -106,7 +102,7 @@ app.post("/v1/messages/send", (req, res) => {
 /* =========================================================================
    3. PENDING SMS ENDPOINT (Android App isko call karke SMS uthati hai)
    ========================================================================= */
-app.get("/v1/messages/pending", (req, res) => {
+router.get("/v1/messages/pending", (req, res) => {
     if (pendingSmsQueue.length === 0) {
         return res.json({ status: "empty", messages: [] });
     }
@@ -119,7 +115,7 @@ app.get("/v1/messages/pending", (req, res) => {
 /* =========================================================================
    4. DEVICE HEARTBEAT / REGISTER (Android App Status Ping)
    ========================================================================= */
-app.post("/v1/sim/register", (req, res) => {
+router.post("/v1/sim/register", (req, res) => {
     const { deviceId, phoneNumber, operator, model } = req.body;
     activeDevices.set(deviceId || "default_phone", {
         id: deviceId || "default_phone",
@@ -131,10 +127,4 @@ app.post("/v1/sim/register", (req, res) => {
     return res.json({ status: "success", message: "Gateway Device Connected" });
 });
 
-/* =========================================================================
-   SERVER LISTEN
-   ========================================================================= */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 SMS Gateway API Server active on port ${PORT}`);
-});
+export default router;
