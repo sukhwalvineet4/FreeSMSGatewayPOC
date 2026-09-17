@@ -1,0 +1,11 @@
+node_modules/
+.env
+*.log
+.DS_Store
+.idea/
+.vscode/
+android_app/.gradle/
+android_app/build/
+android_app/app/build/
+android_app/captures/
+android_app/.navigation/

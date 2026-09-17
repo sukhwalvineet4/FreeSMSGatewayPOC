@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: free-sms-gateway-api
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: SMS_API_KEY
+        value: demo_free_sim_key
