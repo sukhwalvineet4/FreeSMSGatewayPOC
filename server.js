@@ -5,7 +5,6 @@ import http from "http";
 import { WebSocketServer } from "ws";
 import { fileURLToPath } from "url";
 import fs from "fs";
-import localtunnel from "localtunnel";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,8 +18,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
-// Log every incoming request for live debugging
+// Log every incoming request for live debugging & normalize double slashes
 app.use((req, res, next) => {
+    if (req.url) {
+        req.url = req.url.replace(/\/+/g, "/");
+    }
     if (!req.url.startsWith("/public") && !req.url.endsWith(".css") && !req.url.endsWith(".js")) {
         console.log(`📡 [${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
     }
@@ -96,7 +98,7 @@ wss.on("connection", (ws, req) => {
 
                 const deviceRecord = {
                     id: deviceId,
-                    phoneNumber: data.phoneNumber || "+91 8155858353",
+                    phoneNumber: data.phoneNumber || "Mobile Number Missing",
                     operator: data.operator || "Cellular SIM Gateway",
                     model: data.model || "Android Mobile Phone",
                     batteryLevel: data.batteryLevel !== undefined ? data.batteryLevel : 100,
@@ -186,7 +188,7 @@ async function dispatchSmsStateless({ to, content, fromDeviceNumber = null }) {
             targetDevice = activeDevices.values().next().value;
         }
 
-        const senderSimNumber = targetDevice ? targetDevice.phoneNumber : (fromDeviceNumber || "+91 8155858353");
+        const senderSimNumber = targetDevice ? targetDevice.phoneNumber : (fromDeviceNumber || "Mobile Number Missing");
 
         // Global polling queue for legacy mobile app polling
         globalPendingSmsQueue.push({
@@ -238,16 +240,20 @@ async function dispatchSmsStateless({ to, content, fromDeviceNumber = null }) {
             return;
         }
 
-        if (targetDevice) {
-            if (!pendingPollQueues.has(targetDevice.id)) {
-                pendingPollQueues.set(targetDevice.id, []);
-            }
-            pendingPollQueues.get(targetDevice.id).push({
-                msgId: msgId,
-                to: to,
-                content: content
+        if (activeDevices.size === 0) {
+            console.log(`⚠️ SMS Queued in RAM [${msgId}] to ${to}, but NO mobile phone device is currently ONLINE!`);
+            const durationSec = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
+            return resolve({
+                success: false,
+                status: "PENDING_NO_PHONE_CONNECTED",
+                messageId: msgId,
+                mobileNumber: to,
+                message: content,
+                sentViaSim: senderSimNumber,
+                deliveryTime: durationSec,
+                note: "⚠️ SMS is queued on server, but your Android Phone is not connected yet! Open mobile app on phone, enter URL and tap CONNECT GATEWAY.",
+                timestamp: timestamp
             });
-            console.log(`📥 SMS Queued for Mobile Gateway Device [${targetDevice.id}]: To=${to}`);
         }
 
         const durationSec = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
@@ -281,7 +287,7 @@ app.get("/v1/sim/detect-device", (req, res) => {
             device: activeDev ? activeDev.model : "Android Mobile SIM Gateway",
             details: activeDev ? activeDev.operator : "Cellular SIM Gateway Active",
             statusText: "ONLINE (Connected via Global Network)",
-            simNumber: activeDev ? activeDev.phoneNumber : "+91 8155858353"
+            simNumber: activeDev ? activeDev.phoneNumber : "Mobile Number Missing"
         }
     });
 });
@@ -327,14 +333,16 @@ const handleSirSendSms = async (req, res) => {
         };
 
         return res.status(200).json({
-            status: "success",
-            message: "REAL Cellular SMS transmitted directly to recipient mobile!",
-            data: newMessageData,
             success: true,
+            status: result.status || "DELIVERED",
             messageId: result.messageId,
             mobileNumber: recipientPhone,
+            messageSent: messageText,
+            message: messageText,
             sentViaSim: result.sentViaSim,
-            deliveryTime: result.deliveryTime
+            deliveryTime: result.deliveryTime,
+            data: newMessageData,
+            timestamp: result.timestamp
         });
 
     } catch (err) {
@@ -457,7 +465,7 @@ app.get("/v1/devices", (req, res) => {
     if (devicesList.length === 0) {
         devicesList.push({
             deviceId: "active_mobile_sim",
-            phoneNumber: "+91 8155858353",
+            phoneNumber: "Mobile Number Missing",
             operator: "Global SIM Gateway (Ready)",
             model: "Android Mobile SIM Companion",
             batteryLevel: 98,
@@ -480,11 +488,11 @@ app.get("/v1/devices", (req, res) => {
 // Legacy & New Polling Endpoint from Android Companion App
 app.get(["/v1/messages/pending", "/v1/devices/pending", "/v1/devices/:deviceId/pending"], (req, res) => {
     // Auto-Register Polling Mobile Device as ONLINE
-    const deviceId = req.query.deviceId || "mobile_poller_sim";
+    const deviceId = req.params.deviceId || req.query.deviceId || "mobile_poller_sim";
     if (!activeDevices.has(deviceId)) {
         activeDevices.set(deviceId, {
             id: deviceId,
-            phoneNumber: "+91 8155858353",
+            phoneNumber: "Mobile Number Missing",
             operator: "Active SIM Gateway",
             model: "Android Mobile Phone",
             batteryLevel: 95,
@@ -496,7 +504,10 @@ app.get(["/v1/messages/pending", "/v1/devices/pending", "/v1/devices/:deviceId/p
         activeDevices.get(deviceId).lastPing = new Date().toISOString();
     }
 
-    const pendingList = [...globalPendingSmsQueue];
+    const deviceQueue = pendingPollQueues.get(deviceId) || [];
+    pendingPollQueues.set(deviceId, []);
+
+    const pendingList = [...globalPendingSmsQueue, ...deviceQueue];
     globalPendingSmsQueue.length = 0; // Clear pending queue
 
     return res.status(200).json({
@@ -520,23 +531,27 @@ app.post(["/v1/messages/:id/status", "/v1/devices/message-status"], (req, res) =
     return res.status(200).json({ status: "success" });
 });
 
-app.post("/v1/devices/register", (req, res) => {
-    const { deviceId, phoneNumber, operator, model, batteryLevel } = req.body;
-    const id = deviceId || "device_" + Math.random().toString(36).substring(2, 8);
+app.all(["/v1/devices/register", "/register"], (req, res) => {
+    const payload = req.method === "GET" ? req.query : (req.body || {});
+    const deviceId = payload.deviceId || req.query.deviceId || "device_" + Math.random().toString(36).substring(2, 8);
+    const phoneNumber = payload.phoneNumber || req.query.phoneNumber || "Mobile Number Missing";
+    const operator = payload.operator || req.query.operator || "SIM Carrier";
+    const model = payload.model || req.query.model || "Android Phone";
+    const batteryLevel = payload.batteryLevel !== undefined ? payload.batteryLevel : 100;
 
     const devRecord = {
-        id: id,
-        phoneNumber: phoneNumber || "+91 8155858353",
-        operator: operator || "SIM Carrier",
-        model: model || "Android Phone",
-        batteryLevel: batteryLevel !== undefined ? batteryLevel : 100,
+        id: deviceId,
+        phoneNumber: phoneNumber,
+        operator: operator,
+        model: model,
+        batteryLevel: batteryLevel,
         status: "ONLINE",
         lastPing: new Date().toISOString()
     };
 
-    activeDevices.set(id, devRecord);
-    console.log(`📱 DYNAMIC SIM DEVICE REGISTERED (ON): ${devRecord.phoneNumber} (${devRecord.model})`);
-    return res.status(200).json({ status: "success", deviceId: id });
+    activeDevices.set(deviceId, devRecord);
+    console.log(`📱 DYNAMIC SIM DEVICE REGISTERED (ON): ${devRecord.phoneNumber} (${devRecord.model}) [ID: ${deviceId}]`);
+    return res.status(200).json({ status: "success", deviceId: deviceId, message: "Device registered successfully" });
 });
 
 app.post("/v1/devices/unregister", (req, res) => {
@@ -553,20 +568,6 @@ app.post("/v1/devices/unregister", (req, res) => {
     }
     console.log(`🔴 DYNAMIC SIM DEVICE UNREGISTERED (OFF): ${phoneNumber || deviceId}`);
     return res.status(200).json({ status: "success", message: "Device unregistered (OFF) successfully." });
-});
-
-app.get("/v1/devices/:deviceId/pending", (req, res) => {
-    const { deviceId } = req.params;
-    if (activeDevices.has(deviceId)) {
-        activeDevices.get(deviceId).lastPing = new Date().toISOString();
-    }
-    const queue = pendingPollQueues.get(deviceId) || [];
-    pendingPollQueues.set(deviceId, []);
-
-    return res.status(200).json({
-        status: "success",
-        data: queue
-    });
 });
 
 app.get("/v1/system/health", (req, res) => {
@@ -595,19 +596,4 @@ server.listen(PORT, async () => {
     🔑 Developer API Key  : demo_free_sim_key
     =================================================================
     `);
-
-    try {
-        const tunnel = await localtunnel({ port: PORT });
-        console.log(`
-    =================================================================
-    🌐 GLOBAL INTERNET PUBLIC URL (WORKS 1000+ KM AWAY ON 4G/5G DATA)
-    =================================================================
-    🔗 Global Public Web URL  : ${tunnel.url}
-    📥 Global APK Download    : ${tunnel.url}/download/app.apk
-    ⚡ Global SMS API Endpoint: ${tunnel.url}/v1/messages/send
-    =================================================================
-        `);
-    } catch (e) {
-        console.log("Global tunnel notice:", e.message);
-    }
 });
