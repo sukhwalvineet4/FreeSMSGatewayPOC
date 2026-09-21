@@ -33,7 +33,7 @@ router.get("/v1/sim/detect-device", (req, res) => {
             device: activeDev ? activeDev.model : "Android Mobile SIM Gateway",
             details: activeDev ? activeDev.operator : "Cellular SIM Network Gateway Active",
             statusText: isConnected ? "ONLINE (Mobile SIM Gateway Ready)" : "OFFLINE",
-            simNumber: activeDev ? activeDev.phoneNumber : "+91 8155858353"
+            simNumber: activeDev ? activeDev.phoneNumber : "+91 9924804021"
         }
     });
 });
@@ -45,7 +45,7 @@ router.post("/v1/messages/send", (req, res) => {
     // Flexibly accept parameters from Sir's Signup System
     const recipientPhone = req.body.to || req.body.mobileNumber || req.body.phone;
     const messageText = req.body.content || req.body.message || req.body.text || "Welcome to Aarnyasetu";
-    const fromSim = req.body.from || "+91 8155858353";
+    const fromSim = req.body.from || "+91 9924804021";
 
     if (!recipientPhone) {
         return res.status(400).json({
@@ -119,7 +119,7 @@ router.post("/v1/sim/register", (req, res) => {
     const { deviceId, phoneNumber, operator, model } = req.body;
     activeDevices.set(deviceId || "default_phone", {
         id: deviceId || "default_phone",
-        phoneNumber: phoneNumber || "+91 8155858353",
+        phoneNumber: phoneNumber || "+91 9924804021",
         operator: operator || "Cellular SIM Gateway",
         model: model || "Android Phone",
         lastPing: new Date()

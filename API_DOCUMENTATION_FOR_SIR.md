@@ -50,7 +50,7 @@ X-API-KEY: demo_free_sim_key
   "status": "DELIVERED",
   "messageId": "msg_98231a4f",
   "recipient": "+919876543210",
-  "sentViaSim": "+918155858353",
+  "sentViaSim": "+919924804021",
   "content": "Hello! Your verification code for signing up is 482910.",
   "timestamp": "2026-09-17T11:05:05.000Z"
 }
@@ -78,7 +78,7 @@ Generates a 6-digit random verification OTP, sends it via SMS, and holds it in t
   "status": "DELIVERED",
   "messageId": "msg_f3298a01",
   "recipient": "+919800012345",
-  "sentViaSim": "+918155858353",
+  "sentViaSim": "+919924804021",
   "content": "Your MyNewApplication Signup verification OTP code is: 482910. Valid for 5 minutes. Do not share with anyone.",
   "otpCodeSent": "482910",
   "timestamp": "2026-09-17T11:05:05.000Z"
@@ -122,7 +122,7 @@ Returns all online Android mobile SIM gateways registered to the central server.
   "devices": [
     {
       "deviceId": "dev_8921fa",
-      "phoneNumber": "+91 8155858353",
+      "phoneNumber": "+91 9924804021",
       "operator": "Jio 4G / Vivo SIM Gateway",
       "model": "Vivo T1 5G",
       "batteryLevel": 96,

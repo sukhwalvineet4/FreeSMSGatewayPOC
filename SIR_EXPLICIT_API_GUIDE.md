@@ -35,7 +35,7 @@ When a user signs up on your website/app, send a HTTP POST request with this JSO
   "messageId": "msg_haacwsa0",
   "mobileNumber": "+919876543210",
   "message": "Welcome to our Application! Your signup verification OTP code is 482910.",
-  "sentViaSim": "+918155858353",
+  "sentViaSim": "+919924804021",
   "deliveryTime": "1.2 seconds",
   "timestamp": "2026-09-17T05:43:00.593Z"
 }

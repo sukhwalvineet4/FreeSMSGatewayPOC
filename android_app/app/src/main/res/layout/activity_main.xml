@@ -67,7 +67,7 @@
         android:textColorHint="#64748B"
         android:inputType="phone"
         android:padding="12dp"
-        android:text="+91 8155858353"
+        android:text="+91 9924804021"
         android:layout_marginBottom="20dp" />
 
     <!-- 1-CLICK CONNECT / DISCONNECT BUTTON -->
