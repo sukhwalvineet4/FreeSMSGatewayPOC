@@ -1,17 +1,13 @@
-import express from "express";
-import cors from "cors";
-import path from "path";
-import http from "http";
-import { WebSocketServer } from "ws";
-import { fileURLToPath } from "url";
-import fs from "fs";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+const http = require("http");
+const { WebSocketServer } = require("ws");
+const fs = require("fs");
 
 const app = express();
 const server = http.createServer(app);
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5102;
 
 app.use(cors());
 app.use(express.json());

@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "Free Mobile SIM SMS Gateway POC with httpSMS JS API Client & Android SIM Gateway Bridge",
   "main": "server.js",
-  "type": "module",
   "scripts": {
     "start": "node server.js",
     "test-sms": "node test_send_sms.js"
