@@ -4,8 +4,15 @@ node_modules/
 .DS_Store
 .idea/
 .vscode/
+
+# Firebase & Secret Credentials
+firebase-service-account.json
+
+# Android Build Outputs & Gradle Cache
 android_app/.gradle/
 android_app/build/
 android_app/app/build/
 android_app/captures/
 android_app/.navigation/
+android_app/app/release/
+android_app/local.properties

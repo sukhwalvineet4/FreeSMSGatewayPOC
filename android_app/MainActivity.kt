@@ -2,12 +2,12 @@ package com.freesmsgateway.poc
 
 import android.Manifest
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.telephony.SmsManager
-import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.widget.Button
 import android.widget.EditText
@@ -16,6 +16,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.google.firebase.messaging.FirebaseMessaging
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -25,11 +26,12 @@ import java.net.URL
 import kotlin.concurrent.thread
 
 /**
- * Free SMS Gateway - Dynamic Android SIM Companion Application
+ * Free SMS Gateway - Dynamic Android SIM Companion Application (FCM & WebSocket Direct Push)
  * 
  * Features:
- * - Bypasses localtunnel splash screens automatically.
- * - Clean ON / OFF Gateway Toggle Button.
+ * - Direct FCM Push Notification triggers SMS transmission even if app is closed.
+ * - Zero HTTP polling loops (No 2s polling).
+ * - Instant ₹0.00 SIM Cellular SMS Dispatch.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -40,9 +42,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var simNumberInput: EditText
     private lateinit var oneClickConnectButton: Button
     private lateinit var simDetailsTextView: TextView
+    private lateinit var fcmTokenTextView: TextView
 
     private var isGatewayConnected = false
     private var registeredDeviceId: String? = null
+    private var fcmToken: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,6 +63,9 @@ class MainActivity : AppCompatActivity() {
             simNumberInput.setText(detectedNumber)
         }
 
+        // Fetch Firebase FCM Token
+        fetchFirebaseToken()
+
         // 1-Click Toggle Connection ON / OFF Handler
         oneClickConnectButton.setOnClickListener {
             if (!isGatewayConnected) {
@@ -67,6 +74,18 @@ class MainActivity : AppCompatActivity() {
                 disconnectGateway()
             }
         }
+    }
+
+    private fun fetchFirebaseToken() {
+        try {
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    fcmToken = task.result
+                    val prefs = getSharedPreferences("GatewayPrefs", Context.MODE_PRIVATE)
+                    prefs.edit().putString("fcm_token", fcmToken).apply()
+                }
+            }
+        } catch (ignored: Exception) {}
     }
 
     private fun requestPermissionsAndConnectGateway() {
@@ -97,7 +116,7 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST_CODE) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                Toast.makeText(this, "✅ Permissions Granted! Connecting SIM Gateway...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "✅ Permissions Granted! Registering FCM SIM Gateway...", Toast.LENGTH_SHORT).show()
                 connectSimGatewayToCentralServer()
             } else {
                 Toast.makeText(this, "⚠️ SMS Permissions are required to operate as an SMS Gateway", Toast.LENGTH_LONG).show()
@@ -106,7 +125,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * TURN GATEWAY ON -> Register to Central Server
+     * TURN GATEWAY ON -> Register to Central Server with FCM Token
      */
     private fun connectSimGatewayToCentralServer() {
         val serverUrl = serverUrlInput.text.toString().trim()
@@ -117,17 +136,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (userSimNumber.isEmpty()) {
-            Toast.makeText(this, "Please enter your SIM Mobile Number", Toast.LENGTH_SHORT).show()
-            return
-        }
-
         val carrierName = getSimCarrierName()
         val deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}"
         val batteryPct = getBatteryPercentage()
 
         simDetailsTextView.text = "📱 SIM: $userSimNumber ($carrierName) | Device: $deviceModel | Battery: $batteryPct%"
-        statusTextView.text = "🟢 CONNECTING TO SERVER..."
+        statusTextView.text = "🟢 REGISTERING FCM GATEWAY WITH SERVER..."
 
         thread {
             try {
@@ -142,6 +156,7 @@ class MainActivity : AppCompatActivity() {
 
                 val reqBody = JSONObject()
                 reqBody.put("phoneNumber", userSimNumber)
+                reqBody.put("fcmToken", fcmToken ?: "")
                 reqBody.put("operator", carrierName)
                 reqBody.put("model", deviceModel)
                 reqBody.put("batteryLevel", batteryPct)
@@ -161,15 +176,13 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         isGatewayConnected = true
                         oneClickConnectButton.text = "🔴 DISABLE GATEWAY (TURN OFF)"
-                        statusTextView.text = "🟢 ONLINE & ACTIVE ($userSimNumber Ready)"
-                        Toast.makeText(this@MainActivity, "🟢 Gateway Connected & Turned ON!", Toast.LENGTH_SHORT).show()
+                        statusTextView.text = "🟢 FCM GATEWAY ACTIVE (Zero Polling - Ready for Instant Push)"
+                        Toast.makeText(this@MainActivity, "🟢 FCM Gateway Registered Successfully!", Toast.LENGTH_SHORT).show()
                     }
-
-                    startStatelessPollingEngine(serverUrl, registeredDeviceId!!)
 
                 } else {
                     runOnUiThread {
-                        statusTextView.text = "🔴 Connection Failed (HTTP ${conn.responseCode})"
+                        statusTextView.text = "🔴 Registration Failed (HTTP ${conn.responseCode})"
                     }
                 }
             } catch (e: Exception) {
@@ -220,86 +233,6 @@ class MainActivity : AppCompatActivity() {
             oneClickConnectButton.text = "⚡ ALLOW PERMISSIONS & CONNECT GATEWAY (TURN ON)"
             statusTextView.text = "🔴 GATEWAY DISCONNECTED (OFF)"
             Toast.makeText(this@MainActivity, "🔴 Gateway Turned OFF Successfully!", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun startStatelessPollingEngine(serverUrl: String, deviceId: String) {
-        thread {
-            while (isGatewayConnected) {
-                try {
-                    val pollUrl = URL("$serverUrl/v1/devices/$deviceId/pending")
-                    val conn = pollUrl.openConnection() as HttpURLConnection
-                    conn.requestMethod = "GET"
-                    conn.setRequestProperty("Bypass-Tunnel-Reminder", "true")
-                    conn.setRequestProperty("User-Agent", "FreeSIMSMSGatewayApp/1.0")
-                    conn.connectTimeout = 4000
-
-                    if (conn.responseCode == 200) {
-                        val reader = BufferedReader(InputStreamReader(conn.inputStream))
-                        val resObj = JSONObject(reader.readText())
-                        reader.close()
-
-                        val pendingTasks = resObj.optJSONArray("data")
-                        if (pendingTasks != null) {
-                            for (i in 0 until pendingTasks.length()) {
-                                val task = pendingTasks.getJSONObject(i)
-                                val msgId = task.getString("msgId")
-                                val recipientTo = task.getString("to")
-                                val smsContent = task.getString("content")
-
-                                val isSuccess = sendNativeSmsViaSim(recipientTo, smsContent)
-                                reportDispatchStatus(serverUrl, msgId, if (isSuccess) "DELIVERED" else "FAILED")
-                            }
-                        }
-                    }
-
-                    Thread.sleep(2000)
-
-                } catch (e: Exception) {
-                    try { Thread.sleep(3000) } catch (_: Exception) {}
-                }
-            }
-        }
-    }
-
-    private fun sendNativeSmsViaSim(toPhone: String, textMessage: String): Boolean {
-        return try {
-            val smsManager = SmsManager.getDefault()
-            val parts = smsManager.divideMessage(textMessage)
-            if (parts.size > 1) {
-                smsManager.sendMultipartTextMessage(toPhone, null, parts, null, null)
-            } else {
-                smsManager.sendTextMessage(toPhone, null, textMessage, null, null)
-            }
-            true
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
-        }
-    }
-
-    private fun reportDispatchStatus(serverUrl: String, msgId: String, status: String) {
-        try {
-            val statusUrl = URL("$serverUrl/v1/devices/message-status")
-            val conn = statusUrl.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.setRequestProperty("Bypass-Tunnel-Reminder", "true")
-            conn.setRequestProperty("User-Agent", "FreeSIMSMSGatewayApp/1.0")
-            conn.doOutput = true
-
-            val body = JSONObject()
-            body.put("msgId", msgId)
-            body.put("status", status)
-
-            val os: OutputStream = conn.outputStream
-            os.write(body.toString().toByteArray())
-            os.flush()
-            os.close()
-
-            conn.responseCode
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
