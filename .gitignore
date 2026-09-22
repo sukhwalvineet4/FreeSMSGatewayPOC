@@ -6,7 +6,7 @@ node_modules/
 .vscode/
 
 # Firebase & Secret Credentials
-firebase-service-account.json
+sms-app-7043d-firebase-adminsdk-fbsvc-f295d9a1a0.json
 
 # Android Build Outputs & Gradle Cache
 android_app/.gradle/
