@@ -66,11 +66,17 @@ wss.on("connection", (ws) => {
             if (msg.type === "REGISTER" && msg.fcmToken) {
                 const deviceId = msg.deviceId || "dev_" + Math.random().toString(36).substring(2, 8);
                 const simCards = msg.simCards || [];
+                const selectedSimSlot = msg.selectedSimSlot !== undefined ? parseInt(msg.selectedSimSlot) : 0;
                 let phoneNumber = msg.phoneNumber || "Active SIM Gateway";
                 let operator = msg.operator || "SIM Gateway";
                 if (simCards.length > 0) {
-                    phoneNumber = simCards[0].carrier || phoneNumber;
-                    operator = simCards[0].carrier || operator;
+                    const sim = simCards.find(s => s.slot === selectedSimSlot) || simCards[0];
+                    if (sim.number && /\d/.test(sim.number)) {
+                        phoneNumber = sim.number;
+                    }
+                    if (sim.carrier) {
+                        operator = sim.carrier;
+                    }
                 }
                 activeDevices.set(deviceId, {
                     id: deviceId,
@@ -82,11 +88,12 @@ wss.on("connection", (ws) => {
                     batteryLevel: msg.batteryLevel !== undefined ? msg.batteryLevel : 100,
                     networkType: msg.networkType || "Unknown",
                     simCards: simCards,
+                    selectedSimSlot: selectedSimSlot,
                     status: "ONLINE",
                     lastPing: new Date().toISOString()
                 });
-                console.log(`📱 Device registered via WebSocket: ${deviceId} (${phoneNumber})`);
-                ws.send(JSON.stringify({ type: "REGISTERED", deviceId, fcmRegistered: true }));
+                console.log(`📱 Device registered via WebSocket: ${deviceId} (${phoneNumber}) | SIM Slot: ${selectedSimSlot}`);
+                ws.send(JSON.stringify({ type: "REGISTERED", deviceId, fcmRegistered: true, selectedSimSlot }));
             }
         } catch (e) {
             console.error("⚠️ Invalid WebSocket message payload:", e.message);
@@ -194,12 +201,24 @@ async function dispatchSmsJob({
         senderSim = process.env.SENDER_NUMBER || senderSim || "SIM Device";
     }
 
+    let effectiveSlot = simSlot;
+    if (effectiveSlot < 0) {
+        if (targetDevice && targetDevice.selectedSimSlot !== undefined) {
+            effectiveSlot = targetDevice.selectedSimSlot;
+        } else if (anyDevice && anyDevice.selectedSimSlot !== undefined) {
+            effectiveSlot = anyDevice.selectedSimSlot;
+        }
+    }
+
     let carrierName = (anyDevice && anyDevice.operator) ? anyDevice.operator : (lastKnownCarrier || "SIM Carrier");
     if (anyDevice && anyDevice.simCards && anyDevice.simCards.length > 0) {
-        const slotIdx = simSlot >= 0 ? simSlot : 0;
-        const sim = anyDevice.simCards[slotIdx] || anyDevice.simCards[0];
+        const slotIdx = effectiveSlot >= 0 ? effectiveSlot : 0;
+        const sim = anyDevice.simCards.find(s => s.slot === slotIdx) || anyDevice.simCards[0];
         if (sim.carrier) {
             carrierName = sim.carrier;
+        }
+        if (sim.number && /\d/.test(sim.number)) {
+            senderSim = sim.number;
         }
     }
     if (!carrierName || carrierName === "SIM Gateway" || carrierName === "Cellular Carrier") {
@@ -214,7 +233,7 @@ async function dispatchSmsJob({
         senderMobileNumber: senderSim,
         to: to,
         content: content,
-        simSlot: simSlot >= 0 ? simSlot : 0,
+        simSlot: effectiveSlot,
         webhookUrl: webhookUrl || null,
         status: "PENDING",
         sentViaSim: carrierName,
@@ -253,7 +272,7 @@ async function dispatchSmsJob({
             jobId: jobId,
             to: to,
             content: content,
-            simSlot: String(job.simSlot),
+            simSlot: String(effectiveSlot),
             serverUrl: serverUrl || DOMAIN_SERVER_URL,
             domainServerUrl: DOMAIN_SERVER_URL,
             localServerUrl: LOCAL_SERVER_URL,
@@ -379,7 +398,20 @@ app.all(["/v1/devices/register", "/register"], (req, res) => {
     const data = req.method === "GET" ? req.query : (req.body || {});
     const deviceId = data.deviceId || "dev_" + Math.random().toString(36).substring(2, 8);
     const fcmToken = data.fcmToken || data.token || null;
-    const phoneNumber = data.phoneNumber || "Active SIM Gateway";
+    const selectedSimSlot = data.selectedSimSlot !== undefined ? parseInt(data.selectedSimSlot) : 0;
+    const simCards = data.simCards || [];
+    let phoneNumber = data.phoneNumber || "Active SIM Gateway";
+    let operator = data.operator || "SIM Gateway";
+
+    if (simCards.length > 0) {
+        const sim = simCards.find(s => s.slot === selectedSimSlot) || simCards[0];
+        if (sim.number && /\d/.test(sim.number)) {
+            phoneNumber = sim.number;
+        }
+        if (sim.carrier) {
+            operator = sim.carrier;
+        }
+    }
 
     activeDevices.set(deviceId, {
         id: deviceId,
@@ -387,10 +419,11 @@ app.all(["/v1/devices/register", "/register"], (req, res) => {
         fcmToken: fcmToken,
         phoneNumber: phoneNumber,
         model: data.model || "Android Phone",
-        operator: data.operator || "SIM Gateway",
+        operator: operator,
         batteryLevel: data.batteryLevel !== undefined ? data.batteryLevel : 100,
         networkType: data.networkType || "Unknown",
-        simCards: data.simCards || [],
+        simCards: simCards,
+        selectedSimSlot: selectedSimSlot,
         status: "ONLINE",
         lastPing: new Date().toISOString()
     });
@@ -399,7 +432,7 @@ app.all(["/v1/devices/register", "/register"], (req, res) => {
         lastKnownSenderNumber = phoneNumber;
     }
 
-    console.log(`📱 Device registered: ${deviceId} (${phoneNumber}) | Battery: ${data.batteryLevel}% | Net: ${data.networkType}`);
+    console.log(`📱 Device registered: ${deviceId} (${phoneNumber}) | SIM Slot: ${selectedSimSlot} | Battery: ${data.batteryLevel}% | Net: ${data.networkType}`);
     return res.json({ status: "success", deviceId, fcmRegistered: !!fcmToken });
 });
 

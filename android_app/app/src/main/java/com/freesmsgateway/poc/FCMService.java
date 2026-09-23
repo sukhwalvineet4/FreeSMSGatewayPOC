@@ -285,11 +285,22 @@ public class FCMService extends FirebaseMessagingService {
     }
 
     private String getSenderNumberForSlot(int targetSlot) {
+        if (targetSlot < 0) {
+            SharedPreferences prefs = getSharedPreferences("GatewayPrefs", MODE_PRIVATE);
+            targetSlot = prefs.getInt("selected_sim_slot", 0);
+        }
+
         try {
             SharedPreferences prefs = getSharedPreferences("GatewayPrefs", MODE_PRIVATE);
-            String customPhone = prefs.getString("sim_phone_number", "").trim();
-            if (!customPhone.isEmpty() && customPhone.matches(".*\\d.*")) {
-                return customPhone;
+            String slotPhone = prefs.getString("sim_phone_number_slot_" + targetSlot, "").trim();
+            if (!slotPhone.isEmpty() && slotPhone.matches(".*\\d.*")) {
+                return slotPhone;
+            }
+            if (targetSlot == prefs.getInt("selected_sim_slot", -1)) {
+                String activePhone = prefs.getString("sim_phone_number", "").trim();
+                if (!activePhone.isEmpty() && activePhone.matches(".*\\d.*")) {
+                    return activePhone;
+                }
             }
         } catch (Exception ignored) {}
 
@@ -297,61 +308,100 @@ public class FCMService extends FirebaseMessagingService {
             try {
                 SubscriptionManager sm = (SubscriptionManager) getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
                 if (sm != null && checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                    List<SubscriptionInfo> subs = sm.getActiveSubscriptionInfoList();
-                    if (subs != null && !subs.isEmpty()) {
-                        for (SubscriptionInfo sub : subs) {
-                            if (targetSlot < 0 || sub.getSimSlotIndex() == targetSlot) {
-                                String num = null;
-                                if (Build.VERSION.SDK_INT >= 33) {
-                                    try {
-                                        num = sm.getPhoneNumber(sub.getSubscriptionId());
-                                    } catch (Exception ignored) {}
-                                }
-                                if (num == null || num.isEmpty()) {
-                                    try {
-                                        num = sub.getNumber();
-                                    } catch (Exception ignored) {}
-                                }
-                                if (num != null && !num.isEmpty() && num.matches(".*\\d.*")) return num;
-                                if (sub.getCarrierName() != null && !sub.getCarrierName().toString().isEmpty()) {
-                                    return sub.getCarrierName().toString();
-                                }
-                            }
+                    SubscriptionInfo sub = sm.getActiveSubscriptionInfoForSimSlotIndex(targetSlot);
+                    if (sub != null) {
+                        String num = null;
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            try {
+                                num = sm.getPhoneNumber(sub.getSubscriptionId());
+                            } catch (Exception ignored) {}
                         }
+                        if (num == null || num.isEmpty()) {
+                            try {
+                                num = sub.getNumber();
+                            } catch (Exception ignored) {}
+                        }
+                        if (num != null && !num.isEmpty() && num.matches(".*\\d.*")) return num.trim();
                     }
                 }
             } catch (Exception ignored) {}
         }
-        return "SIM Device";
+        return "SIM " + (targetSlot + 1);
     }
 
     /**
      * Obtains the SmsManager instance for the specified SIM slot.
      */
     private SmsManager getSmsManagerForSlot(int targetSlot) {
-        if (targetSlot >= 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+        Log.i(TAG, "🔍 Resolving SmsManager for SIM Slot: " + targetSlot);
+        if (targetSlot < 0) {
+            SharedPreferences prefs = getSharedPreferences("GatewayPrefs", MODE_PRIVATE);
+            targetSlot = prefs.getInt("selected_sim_slot", 0);
+        }
+
+        int resolvedSubId = -1;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
             try {
                 SubscriptionManager sm = (SubscriptionManager) getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
                 if (sm != null) {
-                    List<SubscriptionInfo> subs = sm.getActiveSubscriptionInfoList();
-                    if (subs != null) {
-                        for (SubscriptionInfo sub : subs) {
-                            if (sub.getSimSlotIndex() == targetSlot) {
-                                int subId = sub.getSubscriptionId();
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                    SmsManager base = getSystemService(SmsManager.class);
-                                    if (base != null) return base.createForSubscriptionId(subId);
+                    try {
+                        SubscriptionInfo directInfo = sm.getActiveSubscriptionInfoForSimSlotIndex(targetSlot);
+                        if (directInfo != null) {
+                            resolvedSubId = directInfo.getSubscriptionId();
+                            Log.i(TAG, "Found SubscriptionInfo for slot " + targetSlot + ": SubId=" + resolvedSubId + ", Carrier=" + directInfo.getCarrierName());
+                        }
+                    } catch (Exception ignored) {}
+
+                    if (resolvedSubId < 0) {
+                        List<SubscriptionInfo> subs = sm.getActiveSubscriptionInfoList();
+                        if (subs != null) {
+                            for (SubscriptionInfo sub : subs) {
+                                if (sub.getSimSlotIndex() == targetSlot) {
+                                    resolvedSubId = sub.getSubscriptionId();
+                                    Log.i(TAG, "Matched active sub in list for slot " + targetSlot + ": SubId=" + resolvedSubId + ", Carrier=" + sub.getCarrierName());
+                                    break;
                                 }
-                                return SmsManager.getSmsManagerForSubscriptionId(subId);
                             }
                         }
                     }
                 }
             } catch (Exception e) {
-                Log.w(TAG, "Could not get SmsManager for slot " + targetSlot + ": " + e.getMessage());
+                Log.w(TAG, "Error querying SubscriptionManager for slot " + targetSlot + ": " + e.getMessage());
             }
         }
 
+        if (resolvedSubId < 0) {
+            SharedPreferences prefs = getSharedPreferences("GatewayPrefs", MODE_PRIVATE);
+            if (targetSlot == prefs.getInt("selected_sim_slot", -1)) {
+                resolvedSubId = prefs.getInt("selected_sub_id", -1);
+                if (resolvedSubId >= 0) {
+                    Log.i(TAG, "Using saved selected_sub_id: " + resolvedSubId);
+                }
+            }
+        }
+
+        if (resolvedSubId >= 0) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                try {
+                    SmsManager base = getSystemService(SmsManager.class);
+                    if (base != null) {
+                        Log.i(TAG, "🚀 Successfully created SmsManager (API 31+) for SubId " + resolvedSubId + " (SIM Slot " + targetSlot + ")");
+                        return base.createForSubscriptionId(resolvedSubId);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "createForSubscriptionId error: " + e.getMessage());
+                }
+            }
+            try {
+                Log.i(TAG, "🚀 Successfully created SmsManager for SubId " + resolvedSubId + " (SIM Slot " + targetSlot + ")");
+                return SmsManager.getSmsManagerForSubscriptionId(resolvedSubId);
+            } catch (Exception e) {
+                Log.w(TAG, "getSmsManagerForSubscriptionId error: " + e.getMessage());
+            }
+        }
+
+        Log.w(TAG, "⚠️ Could not resolve SubId for SIM slot " + targetSlot + "! Falling back to default SmsManager.");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             try {
                 SmsManager sm = getSystemService(SmsManager.class);
@@ -362,16 +412,33 @@ public class FCMService extends FirebaseMessagingService {
     }
 
     private String getCarrierForSlot(int targetSlot) {
+        if (targetSlot < 0) {
+            SharedPreferences prefs = getSharedPreferences("GatewayPrefs", MODE_PRIVATE);
+            targetSlot = prefs.getInt("selected_sim_slot", 0);
+        }
+
+        try {
+            SharedPreferences prefs = getSharedPreferences("GatewayPrefs", MODE_PRIVATE);
+            String savedCarrier = prefs.getString("sim_carrier_slot_" + targetSlot, "");
+            if (!savedCarrier.isEmpty() && !savedCarrier.contains("SIM ")) {
+                return savedCarrier;
+            }
+        } catch (Exception ignored) {}
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
             try {
                 SubscriptionManager sm = (SubscriptionManager) getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
                 if (sm != null && checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    SubscriptionInfo sub = sm.getActiveSubscriptionInfoForSimSlotIndex(targetSlot);
+                    if (sub != null && sub.getCarrierName() != null && !sub.getCarrierName().toString().isEmpty()) {
+                        return sub.getCarrierName().toString().trim();
+                    }
                     List<SubscriptionInfo> subs = sm.getActiveSubscriptionInfoList();
                     if (subs != null) {
-                        for (SubscriptionInfo sub : subs) {
-                            if (targetSlot < 0 || sub.getSimSlotIndex() == targetSlot) {
-                                if (sub.getCarrierName() != null && !sub.getCarrierName().toString().isEmpty()) {
-                                    return sub.getCarrierName().toString();
+                        for (SubscriptionInfo s : subs) {
+                            if (s.getSimSlotIndex() == targetSlot) {
+                                if (s.getCarrierName() != null && !s.getCarrierName().toString().isEmpty()) {
+                                    return s.getCarrierName().toString().trim();
                                 }
                             }
                         }
@@ -388,7 +455,7 @@ public class FCMService extends FirebaseMessagingService {
                 if (netOp != null && !netOp.trim().isEmpty()) return netOp.trim();
             }
         } catch (Exception ignored) {}
-        return "SIM Carrier";
+        return "SIM " + (targetSlot + 1);
     }
 
     private void reportJobResult(String serverUrl, String jobId, String status, String error) {

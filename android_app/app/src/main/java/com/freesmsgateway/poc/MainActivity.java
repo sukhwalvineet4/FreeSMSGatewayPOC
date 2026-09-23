@@ -118,10 +118,7 @@ public class MainActivity extends Activity {
         }
 
         if (prefs.getInt("fcm_config_ver", 0) < CONFIG_VERSION) {
-            prefs.edit().remove("fcm_token").putInt("fcm_config_ver", CONFIG_VERSION).apply();
-            try {
-                FirebaseMessaging.getInstance().deleteToken();
-            } catch (Exception ignored) {}
+            prefs.edit().putInt("fcm_config_ver", CONFIG_VERSION).apply();
         }
 
         requestPermissionsIfNeeded();
@@ -130,7 +127,7 @@ public class MainActivity extends Activity {
 
         // Auto-subscribe if previously active
         if (prefs.getBoolean("is_active", false)) {
-            FirebaseMessaging.getInstance().subscribeToTopic("sms_gateway");
+            subscribeToGatewayTopic(0);
         }
 
         startBtn.setOnClickListener(v -> {
@@ -179,12 +176,7 @@ public class MainActivity extends Activity {
                         statusTextView.setText("Status: 🟢 ONLINE (" + finalUrl + ")");
                         statusTextView.setTextColor(android.graphics.Color.parseColor("#22C55E"));
 
-                        FirebaseMessaging.getInstance().subscribeToTopic("sms_gateway")
-                                .addOnCompleteListener(task -> {
-                                    if (task.isSuccessful()) {
-                                        Log.i(TAG, "Subscribed to FCM topic: sms_gateway");
-                                    }
-                                });
+                        subscribeToGatewayTopic(0);
 
                         refreshAndRegister(finalUrl);
                         Toast.makeText(this, "Connected: " + finalUrl, Toast.LENGTH_SHORT).show();
@@ -214,6 +206,21 @@ public class MainActivity extends Activity {
 
             Toast.makeText(this, "Gateway Stopped", Toast.LENGTH_SHORT).show();
         });
+    }
+
+    private void subscribeToGatewayTopic(int retryCount) {
+        FirebaseMessaging.getInstance().subscribeToTopic("sms_gateway")
+                .addOnCompleteListener(task -> {
+                    if (task.isSuccessful()) {
+                        Log.i(TAG, "✅ Successfully subscribed to FCM topic: sms_gateway");
+                    } else {
+                        Log.w(TAG, "⚠️ Topic sync not ready (" + task.getException() + ")");
+                        if (retryCount < 5 && prefs.getBoolean("is_active", false)) {
+                            long delay = (long) Math.pow(2, retryCount) * 1500L;
+                            statusTextView.postDelayed(() -> subscribeToGatewayTopic(retryCount + 1), delay);
+                        }
+                    }
+                });
     }
 
     @Override
@@ -264,23 +271,18 @@ public class MainActivity extends Activity {
     }
 
     private void refreshAndRegister(String serverUrl) {
-        FirebaseMessaging.getInstance().deleteToken()
-                .addOnCompleteListener(deleteTask -> {
-                    FirebaseMessaging.getInstance().getToken()
-                            .addOnCompleteListener(tokenTask -> {
-                                if (!tokenTask.isSuccessful() || tokenTask.getResult() == null) {
-                                    statusTextView.setText("Status: 🔴 FCM INIT FAILED");
-                                    statusTextView.setTextColor(android.graphics.Color.parseColor("#EF4444"));
-                                    Toast.makeText(this, "Failed to get FCM token", Toast.LENGTH_SHORT).show();
-                                    return;
-                                }
-
-                                String freshToken = tokenTask.getResult();
-                                Log.i(TAG, "Fresh FCM Token: " + freshToken);
-                                prefs.edit().putString("fcm_token", freshToken).apply();
-                                registerDeviceWithServer(this, serverUrl, freshToken);
-                                connectWebSocket(this, serverUrl, freshToken);
-                            });
+        FirebaseMessaging.getInstance().getToken()
+                .addOnCompleteListener(tokenTask -> {
+                    String token = "topic_subscriber";
+                    if (tokenTask.isSuccessful() && tokenTask.getResult() != null) {
+                        token = tokenTask.getResult();
+                        Log.i(TAG, "Fresh FCM Token: " + token);
+                        prefs.edit().putString("fcm_token", token).apply();
+                    } else {
+                        Log.w(TAG, "Fetching FCM token failed (using topic fallback): ", tokenTask.getException());
+                    }
+                    registerDeviceWithServer(this, serverUrl, token);
+                    connectWebSocket(this, serverUrl, token);
                 });
     }
 
@@ -579,18 +581,34 @@ public class MainActivity extends Activity {
                 public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                     if (position < detectedSims.size()) {
                         SimCardItem item = detectedSims.get(position);
-                        prefs.edit().putInt("selected_sim_slot", item.slot).apply();
+                        prefs.edit()
+                                .putInt("selected_sim_slot", item.slot)
+                                .putInt("selected_sub_id", item.subId)
+                                .putString("sim_carrier_slot_" + item.slot, item.carrier)
+                                .apply();
+
                         if (item.number != null && !item.number.isEmpty() && item.number.matches(".*\\d.*")) {
                             simNumberInput.setText(item.number);
                             prefs.edit().putString("sim_phone_number", item.number).apply();
                         } else {
-                            String saved = prefs.getString("sim_phone_number", "");
+                            String saved = prefs.getString("sim_phone_number_slot_" + item.slot, "");
                             if (!saved.isEmpty() && saved.matches(".*\\d.*")) {
                                 simNumberInput.setText(saved);
+                                prefs.edit().putString("sim_phone_number", saved).apply();
                             } else {
                                 simNumberInput.setText("");
-                                simNumberInput.setHint("SIM " + (item.slot + 1) + ": " + item.carrier + " (Tap Edit to set)");
+                                simNumberInput.setHint("SIM " + (item.slot + 1) + ": " + item.carrier);
+                                prefs.edit().putString("sim_phone_number", item.carrier).apply();
                             }
+                        }
+
+                        // If gateway is currently running, immediately update server and WebSocket with the newly selected SIM
+                        if (prefs.getBoolean("is_active", false)) {
+                            String url = serverUrlInput.getText().toString().trim();
+                            if (url.isEmpty()) url = prefs.getString("server_url", DEFAULT_URLS[0]);
+                            String token = prefs.getString("fcm_token", "topic_subscriber");
+                            registerDeviceWithServer(MainActivity.this, url, token);
+                            connectWebSocket(MainActivity.this, url, token);
                         }
                     }
                 }
