@@ -1,24 +1,75 @@
-# 📱 Free Mobile SIM SMS Gateway API Server
+# 📱 Free Mobile SIM SMS Gateway API Server (Firebase FCM Powered)
 
-A lightweight, self-hosted **SIM SMS Gateway Backend** built with Node.js & Express. It turns any Android smartphone into an SMS gateway to send messages for ₹0.00 using your SIM card.
+A lightweight, robust **SIM SMS Gateway Backend** built with Node.js, Express, and **Firebase Cloud Messaging (FCM)**. It enables your Android smartphone to act as an SMS gateway to send cellular messages for ₹0.00 using your SIM card, with reliable background delivery even when the phone is locked, asleep (Doze mode), or the app is killed.
 
 ---
 
-## 🚀 Quick Start
+## ⚡ Architecture: Firebase FCM + REST Callback
 
-### 1. Install & Run
+```
+  ┌───────────────────────┐
+  │   Node.js Server      │
+  │   (Job Created)       │
+  └───────────┬───────────┘
+              │
+              │ High-Priority Data Push (FCM)
+              ▼
+  ┌───────────────────────┐
+  │   Firebase FCM        │
+  └───────────┬───────────┘
+              │
+              │ Wakes phone & delivers payload
+              ▼
+  ┌───────────────────────┐
+  │   Android Phone App   │
+  │   (FCMService)        │
+  │           ↓           │
+  │   SmsManager.send()   │
+  └───────────┬───────────┘
+              │
+              │ POST /v1/jobs/:jobId/result
+              ▼
+  ┌───────────────────────┐
+  │   Node.js Server      │
+  │   status = SENT       │
+  └───────────────────────┘
+```
+
+---
+
+## 🚀 Setup Guide
+
+### 1. Firebase Project Setup (One-time)
+1. Go to the [Firebase Console](https://console.firebase.google.com/) and create a project.
+2. Add an Android app with package name: **`com.freesmsgateway.poc`**.
+3. Download **`google-services.json`** and place it in:
+   ```
+   android_app/app/google-services.json
+   ```
+4. In Firebase Console, go to **Project Settings** -> **Service Accounts** -> click **Generate new private key**.
+5. Save the downloaded JSON file as **`serviceAccountKey.json`** in the project root:
+   ```
+   FreeSMSGatewayPOC/serviceAccountKey.json
+   ```
+
+### 2. Run the Node.js Server
 ```bash
 npm install
 npm start
 ```
-Server runs by default on: `http://localhost:3000`
+Server runs by default on: `http://localhost:5102` (or set `PORT` environment variable).
+
+### 3. Connect Android Phone
+1. Build or install the app on your Android phone.
+2. Open the app; it will automatically fetch its FCM Device Token.
+3. Enter your Node Server URL (e.g., `http://192.168.1.100:5102` or your public domain) and tap **REGISTER GATEWAY**.
 
 ---
 
 ## 📡 API Endpoints
 
 ### 1. Send SMS
-- **Endpoint:** `POST /v1/messages/send` (or `/api/send-sms`)
+- **Endpoint:** `POST /v1/messages/send`
 - **Headers:** `Content-Type: application/json`
 - **Body:**
 ```json
@@ -31,7 +82,11 @@ Server runs by default on: `http://localhost:3000`
 ### 2. Check Connected Gateway Devices
 - **Endpoint:** `GET /v1/devices`
 
-### 3. Send OTP
+### 3. Check SMS Jobs
+- **Endpoint:** `GET /v1/jobs`
+- **Endpoint:** `GET /v1/jobs/:jobId`
+
+### 4. Send OTP
 - **Endpoint:** `POST /v1/otp/send`
 - **Body:**
 ```json
@@ -42,7 +97,7 @@ Server runs by default on: `http://localhost:3000`
 }
 ```
 
-### 4. Verify OTP
+### 5. Verify OTP
 - **Endpoint:** `POST /v1/otp/verify`
 - **Body:**
 ```json
@@ -51,9 +106,3 @@ Server runs by default on: `http://localhost:3000`
   "otpCode": "482910"
 }
 ```
-
----
-
-## 📱 Android Companion App
-The companion APK is located at [`FreeSMSGateway.apk`](./FreeSMSGateway.apk).
-Install this APK on your Android phone with the SIM card inserted, set the server URL to your backend endpoint, and tap **Connect**.

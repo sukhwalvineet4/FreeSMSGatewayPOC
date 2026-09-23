@@ -1,11 +1,72 @@
+# =========================================================================
+# Firebase & Security Credentials (Never commit secrets!)
+# =========================================================================
+google-services.json
+serviceAccountKey.json
+*.key
+*.pem
+*.p12
+
+# =========================================================================
+# Android Build Outputs & Packages
+# =========================================================================
+*.apk
+*.aab
+*.idsig
+*.ap_
+*.dex
+FreeSMSGateway.apk
+aligned.apk
+unaligned.apk
+
+# Keystores & Signing files
+*.jks
+*.keystore
+debug.keystore
+
+# Android SDK Local Configuration (contains user-specific paths)
+local.properties
+
+# Gradle Build Cache & Output Directories
+.gradle/
+build/
+*/build/
+*/*/build/
+bin/
+dex/
+.cxx/
+
+# =========================================================================
+# Node.js & Backend
+# =========================================================================
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 .env
-*.log
-.DS_Store
+.env.*
+!.env.example
+
+# Local Runtime Data / Database files
+jobs_data.json
+devices.json
+
+# =========================================================================
+# IDE & Editor Files
+# =========================================================================
 .idea/
 .vscode/
-android_app/.gradle/
-android_app/build/
-android_app/app/build/
-android_app/captures/
-android_app/.navigation/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+
+# =========================================================================
+# OS & System Files
+# =========================================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.log

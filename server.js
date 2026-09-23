@@ -2,594 +2,653 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const http = require("http");
-const { WebSocketServer } = require("ws");
 const fs = require("fs");
+const admin = require("firebase-admin");
+const { WebSocketServer } = require("ws");
 
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5102;
+const DOMAIN_SERVER_URL = process.env.DOMAIN_SERVER_URL || "https://api.aranyasetu.org";
+const LOCAL_SERVER_URL = process.env.LOCAL_SERVER_URL || "http://192.168.29.54:5102";
+const PUBLIC_SERVER_URL = process.env.PUBLIC_SERVER_URL || "http://115.124.117.226:5102";
+const DATA_FILE = path.join(__dirname, "jobs_data.json");
+const DEVICES_FILE = path.join(__dirname, "devices.json");
+if (fs.existsSync(DATA_FILE)) { try { fs.unlinkSync(DATA_FILE); } catch (ignored) {} }
+if (fs.existsSync(DEVICES_FILE)) { try { fs.unlinkSync(DEVICES_FILE); } catch (ignored) {} }
 
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
-// Log every incoming request for live debugging & normalize double slashes
+// Request logger
 app.use((req, res, next) => {
-    if (req.url) {
-        req.url = req.url.replace(/\/+/g, "/");
-    }
     if (!req.url.startsWith("/public") && !req.url.endsWith(".css") && !req.url.endsWith(".js")) {
         console.log(`📡 [${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
     }
     next();
 });
 
-// Default Demo API Key for Sir / Developers
-const API_KEY = process.env.SMS_API_KEY || "demo_free_sim_key";
-
 /* =========================================================================
-   STATELESS DYNAMIC GATEWAY REGISTRY
+   FIREBASE ADMIN SDK (FCM)
    ========================================================================= */
+let firebaseInitialized = false;
+const keyPath = process.env.FIREBASE_SERVICE_ACCOUNT || path.join(__dirname, "serviceAccountKey.json");
 
-// Connected Global SIM Devices Pool: Map<deviceId, deviceRecord>
-const activeDevices = new Map();
-
-// Global Pending Task Queue for legacy/polling Android App
-const globalPendingSmsQueue = [];
-
-// Active OTP Store in RAM
-const activeOtps = new Map();
-
-// Message callback waiting promises
-const pendingMessageCallbacks = new Map();
-
-// Pending HTTP Polling Queue for devices
-const pendingPollQueues = new Map();
-
-function generateMsgId() {
-    return "msg_" + Math.random().toString(36).substring(2, 10);
-}
-
-function generateOtpCode(length = 6) {
-    let otp = "";
-    for (let i = 0; i < length; i++) {
-        otp += Math.floor(Math.random() * 10);
+if (fs.existsSync(keyPath)) {
+    try {
+        const serviceAccount = require(keyPath);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+        firebaseInitialized = true;
+        console.log(`🔥 [Firebase] Admin SDK initialized from: ${path.basename(keyPath)}`);
+    } catch (err) {
+        console.error("❌ [Firebase] Initialization failed:", err.message);
     }
-    return otp;
+} else {
+    console.log(`⚠️  [Firebase] 'serviceAccountKey.json' not found. FCM in simulation mode.`);
 }
 
 /* =========================================================================
-   DIRECT APK DOWNLOAD ENDPOINT FOR MOBILE PHONES
-   ========================================================================= */
-app.get(["/download/app.apk", "/FreeSMSGateway.apk"], (req, res) => {
-    const apkPath = path.join(__dirname, "public", "FreeSMSGateway.apk");
-    if (fs.existsSync(apkPath)) {
-        return res.download(apkPath, "FreeSMSGateway.apk");
-    }
-    const rootApk = path.join(__dirname, "FreeSMSGateway.apk");
-    if (fs.existsSync(rootApk)) {
-        return res.download(rootApk, "FreeSMSGateway.apk");
-    }
-    return res.status(404).send("APK file not found on server.");
-});
-
-/* =========================================================================
-   WEBSOCKET REAL-TIME SERVER FOR GLOBAL ANDROID PHONES (1000+ KM AWAY)
+   WEBSOCKET SERVER FOR ZERO-POLLING LIVE FOREGROUND STATUS
    ========================================================================= */
 const wss = new WebSocketServer({ server, path: "/ws" });
 
-wss.on("connection", (ws, req) => {
-    let registeredDeviceId = null;
-    console.log("🌐 New Android Gateway connected via WebSocket");
+wss.on("connection", (ws) => {
+    console.log("🌐 Companion App connected via WebSocket (Live Status Active)");
+    ws.send(JSON.stringify({ type: "STATUS", status: "CONNECTED", requestRegister: true }));
 
-    ws.on("message", (rawMessage) => {
+    ws.on("message", (raw) => {
         try {
-            const data = JSON.parse(rawMessage.toString());
-
-            // 1. Device Registration / Heartbeat from Mobile App
-            if (data.type === "REGISTER_DEVICE" || data.type === "HEARTBEAT") {
-                const deviceId = data.deviceId || "device_" + Math.random().toString(36).substring(2, 8);
-                registeredDeviceId = deviceId;
-
-                const deviceRecord = {
-                    id: deviceId,
-                    phoneNumber: data.phoneNumber || "Mobile Number Missing",
-                    operator: data.operator || "Cellular SIM Gateway",
-                    model: data.model || "Android Mobile Phone",
-                    batteryLevel: data.batteryLevel !== undefined ? data.batteryLevel : 100,
-                    status: "ONLINE",
-                    lastPing: new Date().toISOString(),
-                    ws: ws
-                };
-
-                activeDevices.set(deviceId, deviceRecord);
-                console.log(`🟢 DYNAMIC SIM DEVICE REGISTERED: Phone = ${deviceRecord.phoneNumber} | Model = ${deviceRecord.model} [ID: ${deviceId}]`);
-
-                ws.send(JSON.stringify({
-                    type: "REGISTER_ACK",
-                    success: true,
-                    deviceId: deviceId,
-                    phoneNumber: deviceRecord.phoneNumber,
-                    message: "Device registered successfully as Global SMS Gateway."
-                }));
-            }
-
-            // 2. Real-Time SMS Dispatch Execution Result from Mobile App
-            if (data.type === "DISPATCH_RESULT") {
-                const { msgId, status, error } = data;
-                console.log(`⚡ SMS Dispatch Result for [${msgId}]: Status = ${status}`);
-
-                if (pendingMessageCallbacks.has(msgId)) {
-                    const callback = pendingMessageCallbacks.get(msgId);
-                    pendingMessageCallbacks.delete(msgId);
-                    callback({
-                        status: status || "DELIVERED",
-                        error: error || null
-                    });
+            const msg = JSON.parse(raw);
+            if (msg.type === "REGISTER" && msg.fcmToken) {
+                const deviceId = msg.deviceId || "dev_" + Math.random().toString(36).substring(2, 8);
+                const simCards = msg.simCards || [];
+                let phoneNumber = msg.phoneNumber || "Active SIM Gateway";
+                let operator = msg.operator || "SIM Gateway";
+                if (simCards.length > 0) {
+                    phoneNumber = simCards[0].carrier || phoneNumber;
+                    operator = simCards[0].carrier || operator;
                 }
+                activeDevices.set(deviceId, {
+                    id: deviceId,
+                    deviceId: deviceId,
+                    fcmToken: msg.fcmToken,
+                    phoneNumber: phoneNumber,
+                    model: msg.model || "Android Phone",
+                    operator: operator,
+                    batteryLevel: msg.batteryLevel !== undefined ? msg.batteryLevel : 100,
+                    networkType: msg.networkType || "Unknown",
+                    simCards: simCards,
+                    status: "ONLINE",
+                    lastPing: new Date().toISOString()
+                });
+                console.log(`📱 Device registered via WebSocket: ${deviceId} (${phoneNumber})`);
+                ws.send(JSON.stringify({ type: "REGISTERED", deviceId, fcmRegistered: true }));
             }
-
-        } catch (err) {
-            console.error("❌ Invalid WS Message Payload:", err.message);
+        } catch (e) {
+            console.error("⚠️ Invalid WebSocket message payload:", e.message);
         }
     });
 
     ws.on("close", () => {
-        if (registeredDeviceId && activeDevices.has(registeredDeviceId)) {
-            console.log(`🔴 SIM Device Disconnected: ${registeredDeviceId}`);
-            activeDevices.delete(registeredDeviceId);
-        }
+        console.log("🔴 Companion App WebSocket closed");
+    });
+
+    ws.on("error", (err) => {
+        console.error("⚠️ Companion App WebSocket error:", err.message);
     });
 });
 
 /* =========================================================================
-   MIDDLEWARE: API KEY AUTHENTICATION
+   IN-MEMORY DATA STORES (Zero disk files, pure in-memory)
    ========================================================================= */
-function authenticateApiKey(req, res, next) {
-    const key = req.headers["x-api-key"] || req.query.apiKey || req.body.apiKey;
-    if (!key || (key !== API_KEY && key !== "demo_free_sim_key")) {
-        return res.status(401).json({
-            status: "error",
-            success: false,
-            error: "Unauthorized: Invalid or missing X-API-KEY header."
-        });
-    }
-    next();
+const activeDevices = new Map();
+const smsJobs = new Map();
+const activeOtps = new Map();
+const pendingJobCallbacks = new Map();
+let lastKnownSenderNumber = process.env.SENDER_NUMBER || null;
+let lastKnownCarrier = process.env.CARRIER_NAME || null;
+
+function generateJobId() {
+    return "job_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
+}
+
+function generateOtp(len = 6) {
+    let otp = "";
+    for (let i = 0; i < len; i++) otp += Math.floor(Math.random() * 10);
+    return otp;
 }
 
 /* =========================================================================
-   CORE STATELESS SMS ROUTING ENGINE
+   CARRIER ANTI-BAN RATE LIMITER (1.5s Spacing per SIM)
    ========================================================================= */
-async function dispatchSmsStateless({ to, content, fromDeviceNumber = null }) {
+let lastDispatchTime = 0;
+const MIN_DISPATCH_INTERVAL_MS = 1500; // 1.5s telecom safe delay
+
+async function enforceCarrierPacing() {
+    const elapsed = Date.now() - lastDispatchTime;
+    if (elapsed < MIN_DISPATCH_INTERVAL_MS) {
+        await new Promise((r) => setTimeout(r, MIN_DISPATCH_INTERVAL_MS - elapsed));
+    }
+    lastDispatchTime = Date.now();
+}
+
+/* =========================================================================
+   MULTI-DEVICE LOAD BALANCING (ROUND-ROBIN)
+   ========================================================================= */
+let roundRobinIndex = 0;
+
+function selectTargetDevice(fromNumber = null, simSlot = -1) {
+    const devices = Array.from(activeDevices.values()).filter((d) => !!d.fcmToken);
+    if (devices.length === 0) return null;
+
+    if (fromNumber) {
+        const cleanFrom = fromNumber.replace(/\D/g, "");
+        for (const dev of devices) {
+            const devPhone = (dev.phoneNumber || "").replace(/\D/g, "");
+            if (devPhone.endsWith(cleanFrom) || cleanFrom.endsWith(devPhone)) {
+                return dev;
+            }
+        }
+    }
+
+    // Round-robin distribution across multiple connected phones
+    const device = devices[roundRobinIndex % devices.length];
+    roundRobinIndex = (roundRobinIndex + 1) % devices.length;
+    return device;
+}
+
+/* =========================================================================
+   FCM SMS DISPATCH ENGINE
+   ========================================================================= */
+async function dispatchSmsJob({
+    to,
+    content,
+    from = null,
+    simSlot = -1,
+    webhookUrl = null,
+    serverUrl = null,
+    waitForReceipt = false,
+    timeoutMs = 2000
+}) {
     const startTime = Date.now();
+    const jobId = generateJobId();
 
-    return new Promise((resolve) => {
-        const msgId = generateMsgId();
-        const timestamp = new Date().toISOString();
+    const targetDevice = selectTargetDevice(from, simSlot);
+    const anyDevice = targetDevice || (activeDevices.size > 0 ? Array.from(activeDevices.values())[0] : null);
 
-        let targetDevice = null;
-        if (fromDeviceNumber) {
-            const cleanTargetFrom = fromDeviceNumber.replace(/\D/g, "");
-            for (const dev of activeDevices.values()) {
-                const cleanDevNum = dev.phoneNumber.replace(/\D/g, "");
-                if (cleanDevNum.endsWith(cleanTargetFrom) || cleanTargetFrom.endsWith(cleanDevNum) || cleanDevNum === cleanTargetFrom) {
-                    targetDevice = dev;
-                    break;
-                }
+    let senderSim = from || (anyDevice ? anyDevice.phoneNumber : null);
+    if (!senderSim || !/\d/.test(senderSim) || senderSim === "Active SIM Gateway" || senderSim === "None") {
+        if (anyDevice && anyDevice.simCards && anyDevice.simCards.length > 0) {
+            const slotIdx = simSlot >= 0 ? simSlot : 0;
+            const sim = anyDevice.simCards[slotIdx] || anyDevice.simCards[0];
+            if (sim.number && /\d/.test(sim.number)) {
+                senderSim = sim.number;
             }
         }
+    }
+    if (!senderSim || !/\d/.test(senderSim)) {
+        senderSim = process.env.SENDER_NUMBER || senderSim || "SIM Device";
+    }
 
-        if (!targetDevice && activeDevices.size > 0) {
-            targetDevice = activeDevices.values().next().value;
+    let carrierName = (anyDevice && anyDevice.operator) ? anyDevice.operator : (lastKnownCarrier || "SIM Carrier");
+    if (anyDevice && anyDevice.simCards && anyDevice.simCards.length > 0) {
+        const slotIdx = simSlot >= 0 ? simSlot : 0;
+        const sim = anyDevice.simCards[slotIdx] || anyDevice.simCards[0];
+        if (sim.carrier) {
+            carrierName = sim.carrier;
         }
-
-        const senderSimNumber = targetDevice ? targetDevice.phoneNumber : (fromDeviceNumber || "Mobile Number Missing");
-
-        // Global polling queue for legacy mobile app polling
-        globalPendingSmsQueue.push({
-            id: msgId,
-            msgId: msgId,
-            to: to,
-            content: content
-        });
-
-        if (targetDevice && targetDevice.ws && targetDevice.ws.readyState === 1) {
-            const timeoutTimer = setTimeout(() => {
-                if (pendingMessageCallbacks.has(msgId)) {
-                    pendingMessageCallbacks.delete(msgId);
-                    const durationSec = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
-                    resolve({
-                        success: true,
-                        status: "DELIVERED",
-                        messageId: msgId,
-                        mobileNumber: to,
-                        message: content,
-                        sentViaSim: senderSimNumber,
-                        deliveryTime: durationSec,
-                        timestamp: timestamp
-                    });
-                }
-            }, 8000);
-
-            pendingMessageCallbacks.set(msgId, (result) => {
-                clearTimeout(timeoutTimer);
-                const durationSec = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
-                resolve({
-                    success: result.status === "DELIVERED" || result.status === "SENT",
-                    status: result.status,
-                    messageId: msgId,
-                    mobileNumber: to,
-                    message: content,
-                    sentViaSim: senderSimNumber,
-                    deliveryTime: durationSec,
-                    timestamp: timestamp
-                });
-            });
-
-            targetDevice.ws.send(JSON.stringify({
-                type: "SEND_SMS",
-                msgId: msgId,
-                to: to,
-                content: content
-            }));
-            return;
-        }
-
-        if (activeDevices.size === 0) {
-            console.log(`⚠️ SMS Queued in RAM [${msgId}] to ${to}, but NO mobile phone device is currently ONLINE!`);
-            const durationSec = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
-            return resolve({
-                success: false,
-                status: "PENDING_NO_PHONE_CONNECTED",
-                messageId: msgId,
-                mobileNumber: to,
-                message: content,
-                sentViaSim: senderSimNumber,
-                deliveryTime: durationSec,
-                note: "⚠️ SMS is queued on server, but your Android Phone is not connected yet! Open mobile app on phone, enter URL and tap CONNECT GATEWAY.",
-                timestamp: timestamp
-            });
-        }
-
-        const durationSec = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
-        resolve({
-            success: true,
-            status: "DELIVERED",
-            messageId: msgId,
-            mobileNumber: to,
-            message: content,
-            sentViaSim: senderSimNumber,
-            deliveryTime: durationSec,
-            timestamp: timestamp
-        });
-    });
-}
-
-/* =========================================================================
-   PUBLIC REST API ENDPOINTS
-   ========================================================================= */
-
-app.get("/v1/sim/detect-device", (req, res) => {
-    let activeDev = null;
-    if (activeDevices.size > 0) {
-        activeDev = activeDevices.values().next().value;
+    }
+    if (!carrierName || carrierName === "SIM Gateway" || carrierName === "Cellular Carrier") {
+        carrierName = lastKnownCarrier || "SIM Carrier";
     }
 
-    return res.json({
-        status: "success",
-        data: {
-            connected: true,
-            device: activeDev ? activeDev.model : "Android Mobile SIM Gateway",
-            details: activeDev ? activeDev.operator : "Cellular SIM Gateway Active",
-            statusText: "ONLINE (Connected via Global Network)",
-            simNumber: activeDev ? activeDev.phoneNumber : "Mobile Number Missing"
-        }
-    });
-});
-
-app.get(["/v1/messages/send", "/api/send-sms"], (req, res) => {
-    return res.json({
-        status: "info",
-        service: "Free SIM SMS Gateway API Endpoint",
-        requestMethod: "HTTP POST Required",
-        instructions: "Send HTTP POST request with JSON payload: { \"mobileNumber\": \"+919876543210\", \"message\": \"Your SMS text here\" }"
-    });
-});
-
-const handleSirSendSms = async (req, res) => {
-    try {
-        const recipientPhone = req.body.to || req.body.mobileNumber || req.body.phone;
-        const messageText = req.body.content || req.body.message || req.body.text || "Welcome to Aarnyasetu";
-        const fromSim = req.body.from;
-
-        if (!recipientPhone) {
-            return res.status(400).json({
-                status: "error",
-                message: "Missing required parameters: 'to' (or 'mobileNumber') and 'content' (or 'message') must be provided."
-            });
-        }
-
-        const result = await dispatchSmsStateless({
-            to: recipientPhone,
-            content: messageText,
-            fromDeviceNumber: fromSim
-        });
-
-        const newMessageData = {
-            id: result.messageId,
-            content: messageText,
-            from: result.sentViaSim,
-            to: recipientPhone,
-            status: "DELIVERED",
-            cost: "₹0.00 (Free SIM)",
-            dispatchMethod: "GLOBAL_SIM_GATEWAY",
-            note: "Real Cellular SMS Transmitted via SIM in < 10s",
-            timestamp: result.timestamp
-        };
-
-        return res.status(200).json({
-            success: true,
-            status: result.status || "DELIVERED",
-            messageId: result.messageId,
-            mobileNumber: recipientPhone,
-            messageSent: messageText,
-            message: messageText,
-            sentViaSim: result.sentViaSim,
-            deliveryTime: result.deliveryTime,
-            data: newMessageData,
-            timestamp: result.timestamp
-        });
-
-    } catch (err) {
-        console.error("❌ SMS API Error:", err.message);
-        return res.status(400).json({
-            status: "error",
-            message: err.message
-        });
-    }
-};
-
-app.post("/v1/messages/send", handleSirSendSms);
-app.post("/api/send-sms", handleSirSendSms);
-
-app.post("/v1/otp/send", async (req, res) => {
-    try {
-        const recipientPhone = req.body.mobileNumber || req.body.to;
-        const appName = req.body.appName || "App";
-        const expiryMinutes = req.body.expiryMinutes || 5;
-
-        if (!recipientPhone) {
-            return res.status(400).json({
-                status: "error",
-                message: "Missing required parameter: 'mobileNumber' (or 'to')."
-            });
-        }
-
-        const otpCode = generateOtpCode(6);
-        const expiresAt = Date.now() + (expiryMinutes * 60 * 1000);
-        
-        activeOtps.set(recipientPhone.replace(/\s+/g, ""), {
-            code: otpCode,
-            expiresAt: expiresAt
-        });
-
-        const smsContent = `Your ${appName} Signup verification OTP code is: ${otpCode}. Valid for ${expiryMinutes} minutes. Do not share with anyone.`;
-
-        const result = await dispatchSmsStateless({
-            to: recipientPhone,
-            content: smsContent
-        });
-
-        return res.status(200).json({
-            status: "success",
-            message: "OTP sent successfully",
-            data: {
-                otpCodeSent: otpCode,
-                to: recipientPhone,
-                content: smsContent,
-                timestamp: result.timestamp
-            }
-        });
-
-    } catch (err) {
-        return res.status(400).json({
-            status: "error",
-            message: err.message
-        });
-    }
-});
-
-app.post("/v1/otp/verify", (req, res) => {
-    const recipientPhone = req.body.mobileNumber || req.body.to;
-    const otpCode = req.body.otpCode || req.body.otp;
-
-    if (!recipientPhone || !otpCode) {
-        return res.status(400).json({
-            status: "error",
-            message: "Missing parameters: 'mobileNumber' and 'otpCode'."
-        });
-    }
-
-    const cleanPhone = recipientPhone.replace(/\s+/g, "");
-    const otpRecord = activeOtps.get(cleanPhone);
-
-    if (!otpRecord) {
-        return res.status(400).json({
-            status: "error",
-            message: "No active OTP found for this phone number. Request a new OTP."
-        });
-    }
-
-    if (Date.now() > otpRecord.expiresAt) {
-        activeOtps.delete(cleanPhone);
-        return res.status(400).json({
-            status: "error",
-            message: "OTP code has expired. Please request a new OTP."
-        });
-    }
-
-    if (otpRecord.code !== otpCode.toString().trim()) {
-        return res.status(400).json({
-            status: "error",
-            message: "Invalid OTP code entered."
-        });
-    }
-
-    activeOtps.delete(cleanPhone);
-
-    return res.status(200).json({
-        status: "success",
-        message: "Mobile phone number successfully verified for signup!"
-    });
-});
-
-app.get("/v1/devices", (req, res) => {
-    const devicesList = [];
-    for (const dev of activeDevices.values()) {
-        devicesList.push({
-            deviceId: dev.id,
-            phoneNumber: dev.phoneNumber,
-            operator: dev.operator,
-            model: dev.model,
-            batteryLevel: dev.batteryLevel,
-            status: dev.status,
-            lastPing: dev.lastPing
-        });
-    }
-
-    if (devicesList.length === 0) {
-        devicesList.push({
-            deviceId: "active_mobile_sim",
-            phoneNumber: "Mobile Number Missing",
-            operator: "Global SIM Gateway (Ready)",
-            model: "Android Mobile SIM Companion",
-            batteryLevel: 98,
-            status: "ONLINE",
-            lastPing: new Date().toISOString()
-        });
-    }
-
-    return res.status(200).json({
-        status: "success",
-        count: devicesList.length,
-        devices: devicesList
-    });
-});
-
-/* =========================================================================
-   LEGACY & NEW MOBILE APP POLLING ENDPOINTS (AUTO-REGISTERS CONNECTED PHONES)
-   ========================================================================= */
-
-// Legacy & New Polling Endpoint from Android Companion App
-app.get(["/v1/messages/pending", "/v1/devices/pending", "/v1/devices/:deviceId/pending"], (req, res) => {
-    // Auto-Register Polling Mobile Device as ONLINE
-    const deviceId = req.params.deviceId || req.query.deviceId || "mobile_poller_sim";
-    if (!activeDevices.has(deviceId)) {
-        activeDevices.set(deviceId, {
-            id: deviceId,
-            phoneNumber: "Mobile Number Missing",
-            operator: "Active SIM Gateway",
-            model: "Android Mobile Phone",
-            batteryLevel: 95,
-            status: "ONLINE",
-            lastPing: new Date().toISOString()
-        });
-        console.log(`📱 MOBILE APP CONNECTED & AUTO-REGISTERED (ONLINE): ${deviceId}`);
-    } else {
-        activeDevices.get(deviceId).lastPing = new Date().toISOString();
-    }
-
-    const deviceQueue = pendingPollQueues.get(deviceId) || [];
-    pendingPollQueues.set(deviceId, []);
-
-    const pendingList = [...globalPendingSmsQueue, ...deviceQueue];
-    globalPendingSmsQueue.length = 0; // Clear pending queue
-
-    return res.status(200).json({
-        status: "success",
-        data: pendingList
-    });
-});
-
-app.post(["/v1/messages/:id/status", "/v1/devices/message-status"], (req, res) => {
-    const msgId = req.params.id || req.body.msgId;
-    const status = req.body.status || "DELIVERED";
-
-    console.log(`✅ Mobile Device Transmitted SMS via SIM! Message ID: [${msgId}] Status: ${status}`);
-
-    if (pendingMessageCallbacks.has(msgId)) {
-        const callback = pendingMessageCallbacks.get(msgId);
-        pendingMessageCallbacks.delete(msgId);
-        callback({ status: status, error: null });
-    }
-
-    return res.status(200).json({ status: "success" });
-});
-
-app.all(["/v1/devices/register", "/register"], (req, res) => {
-    const payload = req.method === "GET" ? req.query : (req.body || {});
-    const deviceId = payload.deviceId || req.query.deviceId || "device_" + Math.random().toString(36).substring(2, 8);
-    const phoneNumber = payload.phoneNumber || req.query.phoneNumber || "Mobile Number Missing";
-    const operator = payload.operator || req.query.operator || "SIM Carrier";
-    const model = payload.model || req.query.model || "Android Phone";
-    const batteryLevel = payload.batteryLevel !== undefined ? payload.batteryLevel : 100;
-
-    const devRecord = {
-        id: deviceId,
-        phoneNumber: phoneNumber,
-        operator: operator,
-        model: model,
-        batteryLevel: batteryLevel,
-        status: "ONLINE",
-        lastPing: new Date().toISOString()
+    const job = {
+        id: jobId,
+        jobId: jobId,
+        deviceId: targetDevice ? targetDevice.id : (anyDevice ? anyDevice.id : null),
+        fcmToken: targetDevice ? targetDevice.fcmToken : null,
+        senderMobileNumber: senderSim,
+        to: to,
+        content: content,
+        simSlot: simSlot >= 0 ? simSlot : 0,
+        webhookUrl: webhookUrl || null,
+        status: "PENDING",
+        sentViaSim: carrierName,
+        error: null,
+        createdAt: new Date().toISOString(),
+        dispatchedAt: null,
+        completedAt: null
     };
 
-    activeDevices.set(deviceId, devRecord);
-    console.log(`📱 DYNAMIC SIM DEVICE REGISTERED (ON): ${devRecord.phoneNumber} (${devRecord.model}) [ID: ${deviceId}]`);
-    return res.status(200).json({ status: "success", deviceId: deviceId, message: "Device registered successfully" });
+    smsJobs.set(jobId, job);
+
+    if (!firebaseInitialized) {
+        job.status = "DISPATCHED";
+        job.dispatchedAt = new Date().toISOString();
+        return {
+            success: true,
+            status: "DISPATCHED_SIMULATED",
+            jobId: jobId,
+            messageId: jobId,
+            senderMobileNumber: senderSim,
+            mobileNumber: to,
+            message: content,
+            sentViaSim: carrierName,
+            deliveryTime: "0.1 seconds",
+            note: "Simulated mode: Add serviceAccountKey.json for real FCM dispatch."
+        };
+    }
+
+    // Anti-ban spacing
+    await enforceCarrierPacing();
+
+    const fcmPayload = {
+        data: {
+            type: "SEND_SMS",
+            action: "SEND_SMS",
+            jobId: jobId,
+            to: to,
+            content: content,
+            simSlot: String(job.simSlot),
+            serverUrl: serverUrl || DOMAIN_SERVER_URL,
+            domainServerUrl: DOMAIN_SERVER_URL,
+            localServerUrl: LOCAL_SERVER_URL,
+            publicServerUrl: PUBLIC_SERVER_URL
+        },
+        android: {
+            priority: "high"
+        }
+    };
+
+    if (targetDevice && targetDevice.fcmToken) {
+        fcmPayload.token = targetDevice.fcmToken;
+    } else {
+        fcmPayload.topic = "sms_gateway";
+    }
+
+    try {
+        await admin.messaging().send(fcmPayload);
+        job.status = "DISPATCHED";
+        job.dispatchedAt = new Date().toISOString();
+        console.log(`⚡ FCM Push Sent for Job [${jobId}] via ${fcmPayload.topic ? `Topic ('${fcmPayload.topic}')` : `Device Token`} (SIM Slot: ${job.simSlot})`);
+    } catch (err) {
+        job.status = "FAILED";
+        job.error = err.message;
+        console.error(`❌ FCM Error for Job [${jobId}]:`, err.message);
+        return {
+            success: false,
+            status: "FCM_FAILED",
+            jobId: jobId,
+            senderMobileNumber: senderSim,
+            mobileNumber: to,
+            error: err.message
+        };
+    }
+
+    // Fast asynchronous return mode (Default: returns immediately in ~0.2 - 0.4s!)
+    if (!waitForReceipt) {
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
+        return {
+            success: true,
+            status: "DISPATCHED",
+            jobId: jobId,
+            messageId: jobId,
+            senderMobileNumber: senderSim,
+            mobileNumber: to,
+            message: content,
+            sentViaSim: carrierName,
+            deliveryTime: duration,
+            note: "FCM Topic push dispatched to phone. Cellular transmission continuing in background."
+        };
+    }
+
+    // Synchronous mode with timeout
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            if (pendingJobCallbacks.has(jobId)) {
+                pendingJobCallbacks.delete(jobId);
+                const duration = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
+                const finalSender = job.senderMobileNumber || senderSim;
+                resolve({
+                    success: true,
+                    status: job.status === "SENT" ? "SENT" : "DISPATCHED",
+                    jobId: jobId,
+                    messageId: jobId,
+                    senderMobileNumber: finalSender,
+                    mobileNumber: to,
+                    message: content,
+                    sentViaSim: job.sentViaSim || carrierName,
+                    deliveryTime: duration,
+                    note: "FCM Topic push dispatched to phone. Cellular transmission continuing in background."
+                });
+            }
+        }, timeoutMs);
+
+        pendingJobCallbacks.set(jobId, (result) => {
+            clearTimeout(timer);
+            const duration = ((Date.now() - startTime) / 1000).toFixed(1) + " seconds";
+            const finalSender = result.senderMobileNumber || job.senderMobileNumber || senderSim;
+            const finalCarrier = result.carrier || job.sentViaSim || carrierName;
+            resolve({
+                success: result.status === "SENT",
+                status: result.status || "SENT",
+                jobId: jobId,
+                messageId: jobId,
+                senderMobileNumber: finalSender,
+                mobileNumber: to,
+                message: content,
+                sentViaSim: finalCarrier,
+                deliveryTime: duration,
+                error: result.error
+            });
+        });
+    });
+}
+
+/* =========================================================================
+   TRIGGER WEBHOOK CALLER NOTIFICATION
+   ========================================================================= */
+function notifyWebhook(job) {
+    if (!job.webhookUrl) return;
+
+    const payload = {
+        event: job.status === "SENT" ? "sms.sent" : "sms.failed",
+        jobId: job.id,
+        to: job.to,
+        status: job.status,
+        sentViaSim: job.sentViaSim,
+        error: job.error,
+        completedAt: job.completedAt
+    };
+
+    fetch(job.webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    }).catch((err) => console.log(`⚠️ Webhook delivery failed for [${job.id}]:`, err.message));
+}
+
+/* =========================================================================
+   DEVICE REGISTRATION WITH TELEMETRY & DUAL-SIM
+   ========================================================================= */
+app.all(["/v1/devices/register", "/register"], (req, res) => {
+    const data = req.method === "GET" ? req.query : (req.body || {});
+    const deviceId = data.deviceId || "dev_" + Math.random().toString(36).substring(2, 8);
+    const fcmToken = data.fcmToken || data.token || null;
+    const phoneNumber = data.phoneNumber || "Active SIM Gateway";
+
+    activeDevices.set(deviceId, {
+        id: deviceId,
+        deviceId: deviceId,
+        fcmToken: fcmToken,
+        phoneNumber: phoneNumber,
+        model: data.model || "Android Phone",
+        operator: data.operator || "SIM Gateway",
+        batteryLevel: data.batteryLevel !== undefined ? data.batteryLevel : 100,
+        networkType: data.networkType || "Unknown",
+        simCards: data.simCards || [],
+        status: "ONLINE",
+        lastPing: new Date().toISOString()
+    });
+
+    if (phoneNumber && /\d/.test(phoneNumber)) {
+        lastKnownSenderNumber = phoneNumber;
+    }
+
+    console.log(`📱 Device registered: ${deviceId} (${phoneNumber}) | Battery: ${data.batteryLevel}% | Net: ${data.networkType}`);
+    return res.json({ status: "success", deviceId, fcmRegistered: !!fcmToken });
 });
 
 app.post("/v1/devices/unregister", (req, res) => {
     const { deviceId, phoneNumber } = req.body;
-    if (deviceId && activeDevices.has(deviceId)) {
-        activeDevices.delete(deviceId);
-    }
+    if (deviceId) activeDevices.delete(deviceId);
     if (phoneNumber) {
         for (const [id, dev] of activeDevices.entries()) {
-            if (dev.phoneNumber === phoneNumber) {
-                activeDevices.delete(id);
-            }
+            if (dev.phoneNumber === phoneNumber) activeDevices.delete(id);
         }
     }
-    console.log(`🔴 DYNAMIC SIM DEVICE UNREGISTERED (OFF): ${phoneNumber || deviceId}`);
-    return res.status(200).json({ status: "success", message: "Device unregistered (OFF) successfully." });
+    console.log(`🔴 Device unregistered: ${deviceId || phoneNumber}`);
+    return res.json({ status: "success" });
+});
+
+app.post(["/v1/devices/number", "/v1/devices/set-number", "/v1/devices/phone-number"], (req, res) => {
+    const number = req.body.number || req.body.phoneNumber || req.body.phone;
+    if (!number) {
+        return res.status(400).json({ status: "error", message: "Missing 'phoneNumber' or 'number' in request body." });
+    }
+    for (const [id, dev] of activeDevices.entries()) {
+        dev.phoneNumber = number;
+    }
+    lastKnownSenderNumber = number;
+    console.log(`📱 Gateway sender number configured: ${number}`);
+    return res.json({ status: "success", phoneNumber: number, message: "Gateway sender mobile number updated." });
+});
+
+/* =========================================================================
+   STATUS CALLBACK FROM ANDROID
+   ========================================================================= */
+const handleResult = (req, res) => {
+    const jobId = req.params.jobId || req.body.jobId || req.body.msgId;
+    const status = req.body.status || "SENT";
+    const error = req.body.error || null;
+    const senderMobileNumber = req.body.senderMobileNumber || req.body.senderNumber || req.body.fromNumber || null;
+    const carrier = req.body.carrier || req.body.sentViaSim || req.body.operator || lastKnownCarrier;
+
+    if (senderMobileNumber && /\d/.test(senderMobileNumber)) {
+        lastKnownSenderNumber = senderMobileNumber;
+    }
+    if (carrier && !/\d{5,}/.test(carrier)) {
+        lastKnownCarrier = carrier;
+    }
+
+    console.log(`✅ [Carrier Result] Job [${jobId}] => ${status}${error ? ` (${error})` : ""}${senderMobileNumber ? ` | SIM: ${senderMobileNumber}` : ""}${carrier ? ` (${carrier})` : ""}`);
+
+    if (jobId && smsJobs.has(jobId)) {
+        const job = smsJobs.get(jobId);
+        job.status = status;
+        job.error = error;
+        if (senderMobileNumber) {
+            job.senderMobileNumber = senderMobileNumber;
+        }
+        if (carrier && !/\d{5,}/.test(carrier)) {
+            job.sentViaSim = carrier;
+        }
+        job.completedAt = new Date().toISOString();
+        notifyWebhook(job);
+    }
+
+    if (jobId && pendingJobCallbacks.has(jobId)) {
+        pendingJobCallbacks.get(jobId)({ status, error, senderMobileNumber, carrier });
+        pendingJobCallbacks.delete(jobId);
+    }
+
+    return res.json({ status: "success", jobId, jobStatus: status, senderMobileNumber, sentViaSim: carrier });
+};
+
+app.post("/v1/jobs/:jobId/result", handleResult);
+app.post(["/v1/devices/message-status", "/v1/messages/:id/status"], handleResult);
+
+/* =========================================================================
+   SEND SMS API (Supports Dual-SIM slot & Webhooks)
+   ========================================================================= */
+const handleSend = async (req, res) => {
+    const to = req.body.to || req.body.mobileNumber || req.body.phone;
+    const content = req.body.content || req.body.message || req.body.text;
+    const from = req.body.senderMobileNumber || req.body.from || req.body.senderNumber || req.body.fromNumber;
+    const simSlot = req.body.simSlot !== undefined ? parseInt(req.body.simSlot) : -1;
+    const webhookUrl = req.body.webhookUrl || req.body.callbackUrl;
+    const waitForReceipt = req.body.waitForReceipt === true || req.body.wait === true || req.query.wait === "true";
+    const timeoutMs = req.body.timeoutMs ? parseInt(req.body.timeoutMs) : 2000;
+
+    if (!to || !content) {
+        return res.status(400).json({ status: "error", message: "Missing 'to' or 'content'." });
+    }
+
+    const host = req.get("host") || "";
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+    let serverUrl = req.body.serverUrl;
+    if (!serverUrl) {
+        if (host.includes("aranyasetu.org")) {
+            serverUrl = DOMAIN_SERVER_URL;
+        } else if (host.includes("115.124.117.226")) {
+            serverUrl = PUBLIC_SERVER_URL;
+        } else if (host.includes("192.168.29.54")) {
+            serverUrl = LOCAL_SERVER_URL;
+        } else if (host.includes("localhost") || host.includes("127.0.0.1")) {
+            serverUrl = LOCAL_SERVER_URL;
+        } else {
+            serverUrl = `${protocol}://${host}`;
+        }
+    }
+
+    const result = await dispatchSmsJob({
+        to: to,
+        content: content,
+        from: from,
+        simSlot: simSlot,
+        webhookUrl: webhookUrl,
+        serverUrl: serverUrl,
+        waitForReceipt: waitForReceipt,
+        timeoutMs: timeoutMs
+    });
+
+    return res.status(result.success ? 200 : 400).json(result);
+};
+
+app.post(["/v1/messages/send", "/api/send-sms"], handleSend);
+
+/* =========================================================================
+   OTP API
+   ========================================================================= */
+app.post("/v1/otp/send", async (req, res) => {
+    const to = req.body.mobileNumber || req.body.to;
+    const appName = req.body.appName || "App";
+    const expiry = req.body.expiryMinutes || 5;
+
+    if (!to) return res.status(400).json({ status: "error", message: "Missing 'mobileNumber'." });
+
+    const code = generateOtp(6);
+    activeOtps.set(to.replace(/\s+/g, ""), { code, expiresAt: Date.now() + expiry * 60000 });
+
+    const text = `Your ${appName} verification code is: ${code}. Valid for ${expiry} mins.`;
+    const result = await dispatchSmsJob({ to, content: text });
+
+    return res.json({ status: "success", data: { otpCodeSent: code, to, jobId: result.jobId } });
+});
+
+app.post("/v1/otp/verify", (req, res) => {
+    const to = (req.body.mobileNumber || req.body.to || "").replace(/\s+/g, "");
+    const code = req.body.otpCode || req.body.otp;
+
+    const record = activeOtps.get(to);
+    if (!record) return res.status(400).json({ status: "error", message: "No active OTP." });
+    if (Date.now() > record.expiresAt) {
+        activeOtps.delete(to);
+        return res.status(400).json({ status: "error", message: "OTP expired." });
+    }
+    if (record.code !== String(code).trim()) {
+        return res.status(400).json({ status: "error", message: "Invalid OTP." });
+    }
+
+    activeOtps.delete(to);
+    return res.json({ status: "success", message: "Phone number verified!" });
+});
+
+/* =========================================================================
+   INSPECTION & HEALTH
+   ========================================================================= */
+app.get("/v1/devices", (req, res) => {
+    return res.json({
+        status: "success",
+        count: activeDevices.size,
+        devices: Array.from(activeDevices.values()).map((d) => ({
+            deviceId: d.id,
+            phoneNumber: d.phoneNumber,
+            model: d.model,
+            batteryLevel: d.batteryLevel,
+            networkType: d.networkType,
+            simCards: d.simCards,
+            status: d.status,
+            fcmRegistered: !!d.fcmToken,
+            lastPing: d.lastPing
+        }))
+    });
+});
+
+app.get("/v1/sim/detect-device", (req, res) => {
+    const dev = activeDevices.values().next().value;
+    return res.json({
+        status: "success",
+        data: {
+            connected: !!dev,
+            device: dev ? dev.model : "None",
+            batteryLevel: dev ? dev.batteryLevel : null,
+            networkType: dev ? dev.networkType : null,
+            simCards: dev ? dev.simCards : [],
+            statusText: dev ? "ONLINE (FCM)" : "OFFLINE",
+            simNumber: dev ? dev.phoneNumber : "None"
+        }
+    });
+});
+
+app.get("/v1/jobs/:jobId", (req, res) => {
+    const job = smsJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ status: "error", message: "Job not found." });
+    return res.json({ status: "success", job });
+});
+
+app.get("/v1/jobs", (req, res) => {
+    return res.json({
+        status: "success",
+        count: smsJobs.size,
+        jobs: Array.from(smsJobs.values()).reverse().slice(0, 50)
+    });
 });
 
 app.get("/v1/system/health", (req, res) => {
-    return res.status(200).json({
+    return res.json({
         status: "OK",
-        service: "Free SMS Gateway Global API Server",
-        activeDevicesCount: activeDevices.size,
-        apiKeyConfigured: API_KEY,
-        statelessStorage: true,
+        firebaseLive: firebaseInitialized,
+        activeDevices: activeDevices.size,
+        totalJobs: smsJobs.size,
         timestamp: new Date().toISOString()
     });
 });
 
 /* =========================================================================
-   START SERVER & START GLOBAL PUBLIC INTERNET TUNNEL
+   APK DOWNLOAD
    ========================================================================= */
-server.listen(PORT, async () => {
+app.get(["/download/app.apk", "/FreeSMSGateway.apk"], (req, res) => {
+    const apkPaths = [
+        path.join(__dirname, "FreeSMSGateway.apk"),
+        path.join(__dirname, "public", "FreeSMSGateway.apk"),
+        path.join(__dirname, "android_app", "app", "build", "outputs", "apk", "release", "app-release.apk")
+    ];
+    for (const p of apkPaths) {
+        if (fs.existsSync(p)) return res.download(p, "FreeSMSGateway.apk");
+    }
+    return res.status(404).send("APK file not found on server.");
+});
+
+/* =========================================================================
+   START
+   ========================================================================= */
+server.listen(PORT, () => {
     console.log(`
     =================================================================
-    🚀 FREE SMS GATEWAY DYNAMIC API SERVER ACTIVE
+    🚀 FREE SIM FCM SMS GATEWAY SERVER ACTIVE (ENTERPRISE EDITION)
     =================================================================
-    📡 Base API Server URL : http://localhost:${PORT}
-    📥 Direct Download APK : http://localhost:${PORT}/download/app.apk
-    🌐 Direct Send Endpoint: POST http://localhost:${PORT}/v1/messages/send
-    🔍 Device Status       : GET  http://localhost:${PORT}/v1/sim/detect-device
-    🔑 Developer API Key  : demo_free_sim_key
+    📡 URL            : http://localhost:${PORT}
+    🔥 Firebase Admin : ${firebaseInitialized ? "INITIALIZED (LIVE)" : "PENDING"}
+    🌐 WebSocket      : ws://localhost:${PORT}/ws
+    📥 Download APK   : http://localhost:${PORT}/download/app.apk
+    📤 Send SMS API   : POST http://localhost:${PORT}/v1/messages/send
+    📱 Devices List   : GET  http://localhost:${PORT}/v1/devices
+    📋 Health         : GET  http://localhost:${PORT}/v1/system/health
     =================================================================
     `);
 });
